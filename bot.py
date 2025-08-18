@@ -25,17 +25,7 @@ h23cf2WfZ0vwDYzZ8QIDAQAB
 
 class AutoStaking:
     def __init__(self) -> None:
-        self.HEADERS = {
-            "Accept": "application/json, text/plain, */*",
-            "Accept-Language": "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7",
-            "Origin": "https://autostaking.pro",
-            "Referer": "https://autostaking.pro/",
-            "Sec-Fetch-Dest": "empty",
-            "Sec-Fetch-Mode": "cors",
-            "Sec-Fetch-Site": "same-site",
-            "User-Agent": FakeUserAgent().random
-        }
-        self.BASE_API = "https://api.autostaking.pro"
+        self.HOST_URL = "https://autostaking.pro"
         self.RPC_URL = "https://testnet.dplabs-internal.com/"
         self.USDC_CONTRACT_ADDRESS = "0x72df0bcd7276f2dFbAc900D1CE63c272C4BCcCED"
         self.USDT_CONTRACT_ADDRESS = "0xD4071393f8716661958F766DF660033b3d35fD29"
@@ -70,6 +60,8 @@ class AutoStaking:
             "then sum the two ranks for each product. Choose the 3 products with the smallest sum of ranks. Allocate the investment equally among these 3 products, "
             "with each receiving approximately 33.3% of the investment."
         )
+        self.BASE_API = None
+        self.HEADERS = {}
         self.proxies = []
         self.proxy_index = 0
         self.account_proxies = {}
@@ -91,7 +83,6 @@ class AutoStaking:
             f"{Fore.WHITE + Style.BRIGHT} | {Style.RESET_ALL}{message}",
             flush=True
         )
-
     def welcome(self):
         print(
             f"""
@@ -462,17 +453,13 @@ class AutoStaking:
         except Exception as e:
             raise Exception(f"Approving Token Contract Failed: {str(e)}")
         
-    async def perform_staking(self, account: str, address: str, change_tx: list, use_proxy: bool):
+    async def perform_staking(self, account: str, address: str, transactions: list, use_proxy: bool):
         try:
             web3 = await self.get_web3_with_check(address, use_proxy)
 
             await self.approving_token(account, address, self.STAKING_ROUTER_ADDRESS, self.USDC_CONTRACT_ADDRESS, self.usdc_amount, use_proxy)
             await self.approving_token(account, address, self.STAKING_ROUTER_ADDRESS, self.USDT_CONTRACT_ADDRESS, self.usdt_amount, use_proxy)
             await self.approving_token(account, address, self.STAKING_ROUTER_ADDRESS, self.MUSD_CONTRACT_ADDRESS, self.musd_amount, use_proxy)
-
-            transactions = await self.generate_change_transactions(address, change_tx, use_proxy)
-            if not transactions:
-                raise Exception("Generate Transaction Calldata Failed")
             
             calldata = transactions["data"]["688688"]["data"]
 
@@ -623,10 +610,29 @@ class AutoStaking:
 
         return choose, rotate
     
+    async def fetch_base_api(self, retries=5):
+        url = f"{self.HOST_URL}/_next/static/chunks/5603-ca6c90d1ea776b3f.js"
+        for attempt in range(retries):
+            try:
+                async with ClientSession(timeout=ClientTimeout(total=60)) as session:
+                    async with session.get(url) as response:
+                        response.raise_for_status()
+                        resp_text = await response.text()
+
+                        match = re.search(r'r\s*=\s*o\.Z\s*\?\s*"([^"]+)"', resp_text)
+                        if match:
+                            return match.group(1)
+
+            except Exception:
+                if attempt < retries - 1:
+                    await asyncio.sleep(5)
+                    continue
+                return None
+    
     async def check_connection(self, proxy_url=None):
         connector, proxy, proxy_auth = self.build_proxy_config(proxy_url)
         try:
-            async with ClientSession(connector=connector, timeout=ClientTimeout(total=10)) as session:
+            async with ClientSession(connector=connector, timeout=ClientTimeout(total=30)) as session:
                 async with session.get(url="https://api.ipify.org?format=json", proxy=proxy, proxy_auth=proxy_auth) as response:
                     response.raise_for_status()
                     return True
@@ -643,7 +649,7 @@ class AutoStaking:
         url = f"{self.BASE_API}/investment/financial-portfolio-recommendation"
         data = json.dumps(self.generate_recommendation_payload(address))
         headers = {
-            **self.HEADERS,
+            **self.HEADERS[address],
             "Authorization": self.auth_tokens[address],
             "Content-Length": str(len(data)),
             "Content-Type": "application/json"
@@ -667,7 +673,7 @@ class AutoStaking:
         url = f"{self.BASE_API}/investment/generate-change-transactions"
         data = json.dumps(self.generate_transactions_payload(address, change_tx))
         headers = {
-            **self.HEADERS,
+            **self.HEADERS[address],
             "Authorization": self.auth_tokens[address],
             "Content-Length": str(len(data)),
             "Content-Type": "application/json"
@@ -749,47 +755,58 @@ class AutoStaking:
         portfolio = await self.financial_portfolio_recommendation(address, use_proxy)
         if portfolio:
             change_tx = portfolio["data"]["changes"]
-
-            tx_hash, block_number = await self.perform_staking(account, address, change_tx, use_proxy)
-            if tx_hash and block_number:
-                explorer = f"https://testnet.pharosscan.xyz/tx/{tx_hash}"
-
-                self.log(
-                    f"{Fore.CYAN+Style.BRIGHT}    Status  :{Style.RESET_ALL}"
-                    f"{Fore.GREEN+Style.BRIGHT} Success {Style.RESET_ALL}"
-                )
-                self.log(
-                    f"{Fore.CYAN+Style.BRIGHT}    Block   :{Style.RESET_ALL}"
-                    f"{Fore.WHITE+Style.BRIGHT} {block_number} {Style.RESET_ALL}"
-                )
-                self.log(
-                    f"{Fore.CYAN+Style.BRIGHT}    Tx Hash :{Style.RESET_ALL}"
-                    f"{Fore.WHITE+Style.BRIGHT} {tx_hash} {Style.RESET_ALL}"
-                )
-                self.log(
-                    f"{Fore.CYAN+Style.BRIGHT}    Explorer:{Style.RESET_ALL}"
-                    f"{Fore.WHITE+Style.BRIGHT} {explorer} {Style.RESET_ALL}"
-                )
             
+            transactions = await self.generate_change_transactions(address, change_tx, use_proxy)
+            if transactions:
+                tx_hash, block_number = await self.perform_staking(account, address, transactions, use_proxy)
+                if tx_hash and block_number:
+                    explorer = f"https://testnet.pharosscan.xyz/tx/{tx_hash}"
+
+                    self.log(
+                        f"{Fore.CYAN+Style.BRIGHT}    Status  :{Style.RESET_ALL}"
+                        f"{Fore.GREEN+Style.BRIGHT} Success {Style.RESET_ALL}"
+                    )
+                    self.log(
+                        f"{Fore.CYAN+Style.BRIGHT}    Block   :{Style.RESET_ALL}"
+                        f"{Fore.WHITE+Style.BRIGHT} {block_number} {Style.RESET_ALL}"
+                    )
+                    self.log(
+                        f"{Fore.CYAN+Style.BRIGHT}    Tx Hash :{Style.RESET_ALL}"
+                        f"{Fore.WHITE+Style.BRIGHT} {tx_hash} {Style.RESET_ALL}"
+                    )
+                    self.log(
+                        f"{Fore.CYAN+Style.BRIGHT}    Explorer:{Style.RESET_ALL}"
+                        f"{Fore.WHITE+Style.BRIGHT} {explorer} {Style.RESET_ALL}"
+                    )
+                
+                else:
+                    self.log(
+                        f"{Fore.CYAN+Style.BRIGHT}    Status  :{Style.RESET_ALL}"
+                        f"{Fore.RED+Style.BRIGHT} Perform On-Chain Failed {Style.RESET_ALL}"
+                    )
             else:
                 self.log(
                     f"{Fore.CYAN+Style.BRIGHT}    Status  :{Style.RESET_ALL}"
-                    f"{Fore.RED+Style.BRIGHT} Perform On-Chain Failed {Style.RESET_ALL}"
+                    f"{Fore.RED+Style.BRIGHT} Fetch Transaction Calldata Failed {Style.RESET_ALL}"
                 )
         else:
             self.log(
                 f"{Fore.CYAN+Style.BRIGHT}    Status  :{Style.RESET_ALL}"
-                f"{Fore.RED+Style.BRIGHT} GET Financial Portfolio Recommendation Failed {Style.RESET_ALL}"
+                f"{Fore.RED+Style.BRIGHT} Fetch Financial Portfolio Recommendation Failed {Style.RESET_ALL}"
             )
 
     async def process_accounts(self, account: str, address: str, use_proxy: bool, rotate_proxy: bool):
         is_valid = await self.process_check_connection(address, use_proxy, rotate_proxy)
         if is_valid:
-            web3 = await self.get_web3_with_check(address, use_proxy)
-            if not web3:
+
+            try:
+                web3 = await self.get_web3_with_check(address, use_proxy)
+            except Exception as e:
                 self.log(
                     f"{Fore.CYAN+Style.BRIGHT}Status  :{Style.RESET_ALL}"
                     f"{Fore.RED+Style.BRIGHT} Web3 Not Connected {Style.RESET_ALL}"
+                    f"{Fore.MAGENTA+Style.BRIGHT}-{Style.RESET_ALL}"
+                    f"{Fore.YELLOW+Style.BRIGHT} {str(e)} {Style.RESET_ALL}"
                 )
                 return
             
@@ -887,6 +904,21 @@ class AutoStaking:
 
                 if use_proxy:
                     await self.load_proxies(use_proxy_choice)
+
+                base_api = await self.fetch_base_api()
+                if not base_api:
+                    self.log(
+                        f"{Fore.GREEN + Style.BRIGHT}Base API Url   : {Style.RESET_ALL}"
+                        f"{Fore.RED + Style.BRIGHT}Fetch Pharos API Url Failed{Style.RESET_ALL}"
+                    )
+                    return
+                
+                self.log(
+                    f"{Fore.GREEN + Style.BRIGHT}Base API Url   : {Style.RESET_ALL}"
+                    f"{Fore.BLUE + Style.BRIGHT}{base_api}{Style.RESET_ALL}"
+                )
+
+                self.BASE_API = base_api
                 
                 separator = "=" * 25
                 for account in accounts:
@@ -913,6 +945,17 @@ class AutoStaking:
                                 f"{Fore.RED + Style.BRIGHT} Cryptography Library Version Not Supported {Style.RESET_ALL}"
                             )
                             continue
+
+                        self.HEADERS[address] = {
+                            "Accept": "application/json, text/plain, */*",
+                            "Accept-Language": "id-ID,id;q=0.9,en-US;q=0.8,en;q=0.7",
+                            "Origin": "https://autostaking.pro",
+                            "Referer": "https://autostaking.pro/",
+                            "Sec-Fetch-Dest": "empty",
+                            "Sec-Fetch-Mode": "cors",
+                            "Sec-Fetch-Site": "same-site",
+                            "User-Agent": FakeUserAgent().random
+                        }
 
                         await self.process_accounts(account, address, use_proxy, rotate_proxy)
                         await asyncio.sleep(3)
